@@ -1,0 +1,65 @@
+name: Python GitOps CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ] # 當碼叔推送到 main 分支時觸發
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. 複製目前的 Python 程式碼
+    - name: Checkout Python Code
+      uses: actions/checkout@v4
+
+    # 2. 登入 GitHub 內建的 2026 最新映像檔倉庫 (GHCR)
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }} # 這是內建的不需要額外設定
+
+    # 3. 打包 Docker 映像檔，並用當下的 Commit 序號作為獨一無二的版本號 (標籤)
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+    # 4. 【高能預警】跨專案連動！拿著碼叔的 Token 去修改 K8s 配置專案
+    - name: Checkout K8s Manifest Repo
+      uses: actions/checkout@v4
+      with:
+        # 換成你原本存放 app.yaml 的儲存庫名稱
+        repository: '${{ github.actor }}/k8s-gitops-manifests' 
+        token: ${{ secrets.G_TOKEN }} # 使用碼叔剛剛鎖進保險箱的權限金鑰
+        path: k8s-manifests # 下載到臨時的獨立資料夾
+
+    # 5. 用 Linux 的 sed 指令，把 app.yaml 裡的 image 欄位直接修改為最新的版本號
+    - name: Update Kubernetes YAML Image Tag
+      run: |
+        cd k8s-manifests
+        # 尋找 image: 這一行，把它替換成全新的 Python 映像檔路徑與當下的 Commit ID
+        sed -i "s|image:.*|image: ghcr.io/${{ github.repository }}:${{ github.sha }}|g" app.yaml
+        
+        # 順便把原本 Nginx 的 port 80 改成 Python 的 5000 (確保 K8s 能夠正確對接)
+        sed -i "s|containerPort:.*|containerPort: 5000|g" app.yaml
+        sed -i "s|targetPort:.*|targetPort: 5000|g" app.yaml
+        
+        # 檢查修改後的成果
+        cat app.yaml
+
+    # 6. 把修改後的 app.yaml 自動 Commit 並 Push 回到 k8s-gitops-manifests 專案
+    - name: Commit and Push Changes back to K8s Repo
+      run: |
+        cd k8s-manifests
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+        git add app.yaml
+        git commit -m "🤖 自動化 CI 升級：部署最新的 Python 映像檔 [commit ${{ github.sha }}]"
+        git push origin main
