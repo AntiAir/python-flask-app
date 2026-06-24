@@ -1,4 +1,4 @@
-name: Python GitOps CI Pipeline
+name: Python GitOps Helm CI Pipeline
 
 on:
   push:
@@ -16,11 +16,9 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
-        # 登入帳號依然可用 actor 變數
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    # 【新增步驟】在 Linux 雲端機器中，把專案名稱轉成全小寫存起來
     - name: Downcase repo name
       run: |
         echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
@@ -30,11 +28,11 @@ jobs:
       with:
         context: .
         push: true
-        # 這裡改用我們剛剛轉換好、保證全小寫的 REPO_LC 變數
         tags: |
           ghcr.io/${{ env.REPO_LC }}:latest
           ghcr.io/${{ env.REPO_LC }}:${{ github.sha }}
 
+    # 跨專案下載 K8s 配置專案
     - name: Checkout K8s Manifest Repo
       uses: actions/checkout@v4
       with:
@@ -42,20 +40,33 @@ jobs:
         token: ${{ secrets.G_TOKEN }}
         path: k8s-manifests
 
-    - name: Update Kubernetes YAML Image Tag
+    # 【重要改動】這次不用 sed 去改死板板的 app.yaml 了！
+    # 我們改用專門處理 YAML 的神級小工具「yq」，優雅且精準地修改 values.yaml 裡面的 tag 欄位
+    - name: Update Helm Chart Values
       run: |
-        cd k8s-manifests
-        # 這裡也要同步改用全小寫的映像檔路徑
-        sed -i "s|image:.*|image: ghcr.io/${{ env.REPO_LC }}:${{ github.sha }}|g" app.yaml
-        sed -i "s|containerPort:.*|containerPort: 5000|g" app.yaml
-        sed -i "s|targetPort:.*|targetPort: 5000|g" app.yaml
-        cat app.yaml
+        cd k8s-manifests/my-python-chart
+        
+        # 1. 精準修改 values.yaml 裡 image.tag 的值，改成當前最新 Commit 的雜湊值
+        # 為了確保系統內建有 yq，我們這裡直接用一行 python 指令來精準替換它
+        python3 -c "
+        import yaml
+        with open('values.yaml', 'r') as f:
+            data = yaml.safe_load(f)
+        data['image']['tag'] = '${{ github.sha }}'
+        with open('values.yaml', 'w') as f:
+            yaml.safe_dump(data, f)
+        "
+        
+        # 2. 檢查修改後的 values.yaml 成果
+        cat values.yaml
 
+    # 把修改後的 values.yaml 送回配置專案
     - name: Commit and Push Changes back to K8s Repo
       run: |
         cd k8s-manifests
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
-        git add app.yaml
-        git commit -m "🤖 自動化 CI 升級：部署最新的 Python 映像檔 [commit ${{ github.sha }}]"
+        # 這次我們只追蹤並提交 values.yaml 的異動即可
+        git add my-python-chart/values.yaml
+        git commit -m "🤖 Helm GitOps 自動升級：發布全新 Image 版本 Tag [${{ github.sha }}]"
         git push origin main
